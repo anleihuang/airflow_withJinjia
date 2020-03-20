@@ -1,0 +1,219 @@
+# datatime lib
+from datetime import datetime, timedelta
+from time import time
+# logging lib
+import logging
+# to instantiate a DAG
+from airflow import DAG
+from airflow.models import Variable
+#from airflow.utils import trigger_rule
+# to get DAG operators
+from airflow.operators.python_operator import PythonOperator
+from airflow.utils.dates import days_ago
+# import google dataproc operators
+from airflow.contrib.operators.dataproc_operator import (DataprocClusterCreateOperator,
+                                                        DataProcSparkOperator, 
+                                                        DataprocClusterDeleteOperator
+                                                        )
+# use airflow sensor to check if the file exists or not
+from airflow.contrib.sensors.gcs_sensor import GoogleCloudStorageObjectSensor
+# 
+from airflow.contrib.operators.gcs_to_bq import GoogleCloudStorageToBigQueryOperator
+
+# specifiy default args
+default_args = {
+    'project_id': Variable.get('project_id', default_var=None),
+    'depends_on_past': False,
+    'email': ['test@gmail.com'],
+    'email_on_failure': True,
+    'email_on_retry': False,
+    'retries': 1,
+    'retry_delay': timedelta(minutes=5)
+}
+
+# specify global variable cleaned_dag_id
+cleaned_dag_id = '{{ dag_name }}'.strip()
+
+# include xcoms to allow tasks exchange messages & share states through xcom_push & xcom_pull
+def push_unique_cluster_name(**kwargs):
+    """Pushes an XCOM without return value
+    develop a unique cluster name to avoid name collision
+    """
+    unique_cluster_name = cleaned_dag_id + '-' + str(int(time() * 10000 % 10000))
+    ti = kwargs['ti']
+    ti.xcom_push(key='unique_cluster_name', value=unique_cluster_name)
+
+# ==========
+# == DAG ===
+# ==========
+# instantiate a dag
+dag = DAG(
+    dag_id=cleaned_dag_id,
+    description='{{ description }}',
+    start_date= {{ start_date }},
+    {% if end_date -%}
+    end_date= {{ end_date }},
+    {% endif -%}
+    schedule_interval='{{ schedule_interval }}',
+    concurrency={{ concurrency }},
+    max_active_runs={{ max_active_runs }},
+    default_args=default_args
+)
+
+# ============
+# == Tasks ===
+# ============
+
+# unique tasks
+push_unique_cluster_name = PythonOperator(
+    task_id='generate_unique_cluster_name',
+    provide_context=True,
+    python_callable=push_unique_cluster_name,
+    dag=dag
+)
+
+# replicate tasks (dataproc_list)
+{% for dataproc in dataproc_list %}
+{{ dataproc.create_task_id }}{{ dataproc.id }} = DataprocClusterCreateOperator(
+    task_id='{{ dataproc.create_task_id }}{{ dataproc.id }}',
+    cluster_name='{% raw %}{{ ti.xcom_pull(key=unique_cluster_name, task_ids="generate_unique_cluster_name") }}{% endraw %}' + '{{ dataproc.id }}',
+    project_id=Variable.get('project_id', default_var=None),
+    region='us-west1',
+    master_machine_type='{{ dataproc.master_machine_type }}',
+    worker_machine_type='{{ dataproc.worker_machine_type }}',
+    num_workers={{ dataproc.num_workers }},
+    execution_timeout={{ dataproc.execution_timeout }},
+    dag=dag
+)
+
+{{ dataproc.delete_task_id}}{{ dataproc.id }} = DataprocClusterDeleteOperator(
+    task_id='{{ dataproc.delete_task_id}}{{ dataproc.id }}',
+    cluster_name='{% raw %}{{ ti.xcom_pull(key=unique_cluster_name, task_ids="generate_unique_cluster_name") }}{% endraw %}' + '{{ dataproc.id }}',
+    region='us-west1',
+    project_id=Variable.get('project_id', default_var=None),
+    execution_timeout={{ dataproc.execution_timeout }},
+    dag=dag
+)
+{% endfor %}
+
+
+# =================
+# == Spark Jobs ===
+# =================
+
+{% for spark_job in spark_job_list %}
+# define arguments
+args = {{ spark_job.args }}
+{{ spark_job.task_id }} = DataProcSparkOperator(
+    task_id='{{ spark_job.task_id }}',
+    dataproc_spark_jars=['{{ spark_job.jars }}'],
+    main_class='{{ spark_job.main_class }}',
+    region='us-west1',
+    job_name=cleaned_dag_id + '{{ spark_job.task_id }}',
+    cluster_name='{% raw %}{{ ti.xcom_pull(key=unique_cluster_name, task_ids="generate_unique_cluster_name") }}{% endraw %}' + '{{ spark_job.dataproc_cluster_id }}',
+    execution_timeout={{ spark_job.execution_timeout }},
+    arguments=args,
+    dag=dag
+)
+{% endfor %}
+
+
+# ==================
+# == gcs sensors ===
+# ==================
+
+{% if sensor_list %}
+{% for sensor in sensor_list %}
+{{ sensor.task_id }} = GoogleCloudStorageObjectSensor(
+    task_id='{{ sensor.task_id }}',
+    bucket='{{ sensor.bucket }}',
+    object='{{ sensor.object }}',
+    poke_interval={% if sensor.poke_interval %}{{ sensor.poke_interval }}{% else %}30{% endif %},
+    timeout={% if sensor.timeout %}{{ sensor.timeout }}{% else %}1800{% endif %},
+    dag=dag
+)
+{% endfor %}
+{% endif %}
+
+
+# =======================
+# == load to bigquery ===
+# =======================
+
+{% if bq_list %}
+{% for bq in bq_list %}
+{{ bq.task_id }} = GoogleCloudStorageToBigQueryOperator(
+    task_id='{{ bq.task_id }}',
+    bucket='{{ bq.bucket }}',
+    source_objects={{ bq.source_objects }},
+    source_format='{{ bq.source_format }}',
+    destination_project_dataset_table='{{ bq.dest_table }}',
+    schema_fields={{ bq.schema_fields }},
+    create_disposition='{{ bq.create_disposition }}',
+    write_disposition='{{ bq.write_disposition }}',
+    dag=dag
+)
+{% endfor %}
+{% endif %}
+
+# =================
+# == tasks flow ===
+# =================
+
+# dataproc upstream & downstream for both create and delete dataproc
+{% for dataproc in dataproc_list -%}
+
+{% if dataproc.create_upstream -%}
+{% for upstream in dataproc.create_upstream -%}
+{{ dataproc.create_task_id }}{{dataproc.id}}.set_upstream({{ upstream }})
+{% endfor -%}
+{% endif -%}
+
+{% if dataproc.create_downstream -%}
+{% for downstream in dataproc.create_downstream -%}
+{{ dataproc.create_task_id }}{{dataproc.id}}.set_downstream({{ downstream }})
+{% endfor -%}
+{% endif -%}
+
+{% if dataproc.delete_upstream -%}
+{% for upstream in dataproc.delete_upstream -%}
+{{ dataproc.delete_task_id }}{{dataproc.id}}.set_upstream({{ upstream }})
+{% endfor -%}
+{% endif -%}
+
+{% if dataproc.delete_downstream -%}
+{% for downstream in dataproc.delete_downstream -%}
+{{ dataproc.delete_task_id }}{{dataproc.id}}.set_downstream({{ downstream }})
+{% endfor -%}
+{% endif -%}
+
+{% endfor -%}
+
+
+# create job upstream & downstream
+{% for job in spark_job_list -%}
+
+{% if job.job_upstream -%}
+{% for upstream in job.job_upstream -%}
+{{ job.task_id }}.set_upstream({{ upstream }})
+{% endfor -%}
+{% endif -%}
+
+{% if job.job_downstream -%}
+{% for downstream in job.job_downstream -%}
+{{ job.task_id }}.set_downstream({{ downstream }})
+{% endfor -%}
+{% endif -%}
+
+{% endfor -%}
+
+# create cfs_to_bq upstream & downstream
+{% for bq in bq_list -%}
+
+{% if bq.job_downstream -%}
+{% for downstream in bq.job_downstream -%}
+{{ bq.task_id }}.set_downstream({{ downstream }})
+{% endfor -%}
+{% endif -%}
+
+{% endfor -%}

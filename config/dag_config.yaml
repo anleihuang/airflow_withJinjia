@@ -1,0 +1,212 @@
+---
+
+- dag_name: example-sequential
+  description: run DAGs sequentially
+  jinja2_template: dataproc-airflow.py.j2
+  start_date: datetime(2020, 3, 15)
+  schedule_interval: '@daily'
+  concurrency: 10
+  max_active_runs: 1
+  dataproc_list:
+    - id: 1
+      execution_timeout: timedelta(minutes=20)
+      create_task_id: create_cluster_
+      master_machine_type: n1-standard-2
+      worker_machine_type: n1-standard-2
+      num_workers: 2
+      create_upstream: [push_unique_cluster_name, sensor_task]
+      delete_task_id: delete_cluster_
+    - id: 2
+      execution_timeout: timedelta(minutes=20)
+      create_task_id: create_cluster_
+      master_machine_type: n1-standard-2
+      worker_machine_type: n1-standard-2
+      num_workers: 2
+      create_upstream: [push_unique_cluster_name, delete_cluster_1]
+      delete_task_id: delete_cluster_
+  spark_job_list:
+    - dataproc_cluster_id: 1
+      task_id: calc_users
+      args: |
+        ["--args.for.jar", "ThisIsArgs"]
+      jars: gs://exampleBucket/jar/yourProject-assembly-0.1.jar
+      main_class: yourProject.com.ActionProcess
+      execution_timeout: timedelta(hours=2)
+      job_upstream: [create_cluster_1]
+      job_downstream: [bq_load_user, calc_agg]
+    - dataproc_cluster_id: 1
+      task_id: calc_agg
+      args: |
+        ["--args.for.jar", "ThisIsArgs"]
+      jars: gs://exampleBucket/jar/yourProject-assembly-0.1.jar
+      main_class: yourProject.com.ActionProcess
+      execution_timeout: timedelta(hours=2)
+      job_downstream: [bq_load_agg]
+    - dataproc_cluster_id: 2
+      task_id: calc_retention_day1
+      args: |
+        ["--args.for.jar", "ThisIsArgs"]
+      jars: gs://exampleBucket/jar/yourProject-assembly-0.1.jar
+      main_class: yourProject.com.ActionProcess
+      execution_timeout: timedelta(hours=2)
+      job_upstream: [create_cluster_2]
+      job_downstream: [bq_load_retention]
+  sensor_list:
+    - task_id: sensor_task
+      bucket: exampleBucket
+      object: output/user/_SUCCESS
+      poke_interval: 30
+      timeout: 2700
+  bq_list:
+    - task_id: bq_load_user
+      bucket: exampleBucket
+      source_objects: |
+        ["obj_folder/*"]
+      source_format: NEWLINE_DELIMITED_JSON
+      dest_table: 'exampleSchema.exampleTable0'
+      schema_fields: |
+        [
+          {'name':'user_id', 'type': 'STRING', 'mode': 'NULLABLE'},
+          {'name':'first_timestamp', 'type': 'STRING', 'mode': 'NULLABLE'},
+        ]
+      create_disposition: CREATE_IF_NEEDED
+      write_disposition: WRITE_TRUNCATE
+    - task_id: bq_load_agg
+      bucket: exampleBucket
+      source_objects: |
+        ["obj_folder/*"]
+      source_format: NEWLINE_DELIMITED_JSON
+      dest_table: 'exampleSchema.exampleTable1'
+      schema_fields: |
+        [
+          {'name':'user_id', 'type': 'STRING', 'mode': 'NULLABLE'},
+          {'name':'start_station_id', 'type': 'STRING', 'mode': 'NULLABLE'},
+          {'name':'end_station_id', 'type': 'STRING', 'mode': 'NULLABLE'},
+          {'name':'zip_code', 'type': 'STRING', 'mode': 'NULLABLE'},
+          {'name':'avg_ec', 'type': 'FLOAT64', 'mode': 'NULLABLE'},
+        ]
+      create_disposition: CREATE_IF_NEEDED
+      write_disposition: WRITE_TRUNCATE
+      job_downstream: [delete_cluster_1]
+    - task_id: bq_load_retention
+      bucket: exampleBucket
+      source_objects: |
+        ["obj_folder/*"]
+      source_format: NEWLINE_DELIMITED_JSON
+      dest_table: 'exampleSchema.exampleTable2'
+      schema_fields: |
+        [
+          {'name':'user_id', 'type': 'STRING', 'mode': 'NULLABLE'},
+          {'name':'start_station_id', 'type': 'STRING', 'mode': 'NULLABLE'},
+          {'name':'end_station_id', 'type': 'STRING', 'mode': 'NULLABLE'},
+          {'name':'zip_code', 'type': 'STRING', 'mode': 'NULLABLE'},
+          {'name':'retention', 'type': 'INTEGER', 'mode': 'NULLABLE'},
+        ]
+      create_disposition: CREATE_IF_NEEDED
+      write_disposition: WRITE_APPEND
+      job_downstream: [delete_cluster_2]
+- dag_name: example-parallel
+  description: run DAGs parallelly
+  jinja2_template: dataproc-airflow.py.j2
+  start_date: datetime(2020, 3, 15)
+  schedule_interval: '@daily'
+  concurrency: 10
+  max_active_runs: 1
+  dataproc_list:
+    - id: 1
+      execution_timeout: timedelta(minutes=20)
+      create_task_id: create_cluster_
+      master_machine_type: n1-standard-2
+      worker_machine_type: n1-standard-2
+      num_workers: 2
+      create_upstream: [push_unique_cluster_name, sensor_task]
+      delete_task_id: delete_cluster_
+    - id: 2
+      execution_timeout: timedelta(minutes=20)
+      create_task_id: create_cluster_
+      master_machine_type: n1-standard-2
+      worker_machine_type: n1-standard-2
+      num_workers: 2
+      create_upstream: [push_unique_cluster_name, delete_cluster_1]
+      delete_task_id: delete_cluster_
+  spark_job_list:
+    - dataproc_cluster_id: 1
+      task_id: calc_unique_users
+      args: |
+        ["--args.for.jar", "ThisIsArgs"]
+      jars: ggs://exampleBucket/jar/yourProject-assembly-0.1.jar
+      main_class: yourProject.com.ActionProcess
+      execution_timeout: timedelta(hours=2)
+      job_upstream: [create_cluster_1]
+      job_downstream: [bq_load_user, calc_agg]
+    - dataproc_cluster_id: 1
+      task_id: calc_agg
+      args: |
+        ["--args.for.jar", "ThisIsArgs"]
+      jars: ggs://exampleBucket/jar/yourProject-assembly-0.1.jar
+      main_class: yourProject.com.ActionProcess
+      execution_timeout: timedelta(hours=2)
+      job_downstream: [bq_load_agg]
+    - dataproc_cluster_id: 2
+      task_id: calc_retention_day1
+      args: |
+        ["--args.for.jar", "ThisIsArgs"]
+      jars: ggs://exampleBucket/jar/yourProject-assembly-0.1.jar
+      main_class: yourProject.com.ActionProcess
+      execution_timeout: timedelta(hours=2)
+      job_upstream: [create_cluster_2]
+      job_downstream: [bq_load_retention]
+  sensor_list:
+    - task_id: sensor_task
+      bucket: exampleBucket
+      object: output/user/_SUCCESS
+      poke_interval: 30
+      timeout: 2700
+  bq_list:
+    - task_id: bq_load_user
+      bucket: exampleBucket
+      source_objects: |
+        ["obj_folder/*"]
+      source_format: NEWLINE_DELIMITED_JSON
+      dest_table: 'exampleSchema.exampleTable0'
+      schema_fields: |
+        [
+          {'name':'user_id', 'type': 'STRING', 'mode': 'NULLABLE'},
+          {'name':'first_timestamp', 'type': 'STRING', 'mode': 'NULLABLE'},
+        ]
+      create_disposition: CREATE_IF_NEEDED
+      write_disposition: WRITE_TRUNCATE
+    - task_id: bq_load_agg
+      bucket: exampleBucket
+      source_objects: |
+        ["obj_folder/*"]
+      source_format: NEWLINE_DELIMITED_JSON
+      dest_table: 'exampleSchema.exampleTable1'
+      schema_fields: |
+        [
+          {'name':'user_id', 'type': 'STRING', 'mode': 'NULLABLE'},
+          {'name':'start_station_id', 'type': 'STRING', 'mode': 'NULLABLE'},
+          {'name':'end_station_id', 'type': 'STRING', 'mode': 'NULLABLE'},
+          {'name':'zip_code', 'type': 'STRING', 'mode': 'NULLABLE'},
+          {'name':'avg_ec', 'type': 'FLOAT64', 'mode': 'NULLABLE'},
+        ]
+      create_disposition: CREATE_IF_NEEDED
+      write_disposition: WRITE_TRUNCATE
+      job_downstream: [delete_cluster_1]
+    - task_id: bq_load_retention
+      bucket: exampleBucket
+      source_objects: |
+        ["obj_folder/*"]
+      source_format: NEWLINE_DELIMITED_JSON
+      dest_table: 'exampleSchema.exampleTable2'
+      schema_fields: |
+        [
+          {'name':'user_id', 'type': 'STRING', 'mode': 'NULLABLE'},
+          {'name':'start_station_id', 'type': 'STRING', 'mode': 'NULLABLE'},
+          {'name':'end_station_id', 'type': 'STRING', 'mode': 'NULLABLE'},
+          {'name':'zip_code', 'type': 'STRING', 'mode': 'NULLABLE'},
+          {'name':'retention', 'type': 'INTEGER', 'mode': 'NULLABLE'},
+        ]
+      create_disposition: CREATE_IF_NEEDED
+      write_disposition: WRITE_APPEND
+      job_downstream: [delete_cluster_2]

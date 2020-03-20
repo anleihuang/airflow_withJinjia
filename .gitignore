@@ -1,0 +1,10 @@
+# macOs
+.DS_Store
+
+# virtual env folder
+venv/
+
+# editors
+.idea
+.vscode
+pyvenv.cfg
