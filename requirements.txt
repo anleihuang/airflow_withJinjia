@@ -67,7 +67,7 @@ pandas-gbq==0.13.1
 pathspec==0.7.0
 pendulum==1.4.4
 prison==0.1.2
-protobuf==3.11.3
+protobuf==3.18.3
 psutil==5.7.0
 pyasn1==0.4.8
 pyasn1-modules==0.2.8
